@@ -20,6 +20,8 @@ assets = "./admin"
 # Configure the http api
 [api]
 port = 8086
+# ssl-port = 8084
+# ssl-cert = /path/to/cert.pem
 
 # Raft configuration
 [raft]

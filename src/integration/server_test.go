@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -267,6 +268,39 @@ func (self *ServerSuite) TestDataReplication(c *C) {
 		}
 	}
 	c.Assert(serversWithPoint, Equals, 2)
+}
+
+func (self *ServerSuite) TestSslSupport(c *C) {
+	data := `
+  [{
+    "points": [
+        ["val1", 2]
+    ],
+    "name": "test_sll",
+    "columns": ["val_1", "val_2"]
+  }]`
+	self.serverProcesses[0].Post("/db/test_rep/series?u=paul&p=pass", data, c)
+
+	encodedQuery := url.QueryEscape("select * from test_sll")
+	fullUrl := fmt.Sprintf("https://localhost:60503/db/test_rep/series?u=paul&p=pass&q=%s", encodedQuery)
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := http.Client{
+		Transport: transport,
+	}
+	resp, err := client.Get(fullUrl)
+	c.Assert(err, IsNil)
+	defer resp.Body.Close()
+	c.Assert(resp.StatusCode, Equals, http.StatusOK)
+	body, err := ioutil.ReadAll(resp.Body)
+	c.Assert(err, IsNil)
+	var js []interface{}
+	err = json.Unmarshal(body, &js)
+	c.Assert(err, IsNil)
+	collection := ResultsToSeriesCollection(js)
+	series := collection.GetSeries("test_sll", c)
+	c.Assert(len(series.Points) > 0, Equals, true)
 }
 
 func (self *ServerSuite) TestInvalidUserNameAndDbName(c *C) {

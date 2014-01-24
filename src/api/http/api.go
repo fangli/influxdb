@@ -4,6 +4,7 @@ import (
 	log "code.google.com/p/log4go"
 	"common"
 	"coordinator"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"engine"
@@ -12,6 +13,7 @@ import (
 	"io/ioutil"
 	"net"
 	libhttp "net/http"
+	"os"
 	"path/filepath"
 	"protocol"
 	"regexp"
@@ -32,7 +34,10 @@ func init() {
 
 type HttpServer struct {
 	conn           net.Listener
+	sslConn        net.Listener
 	httpPort       string
+	httpSslPort    string
+	httpSslCert    string
 	adminAssetsDir string
 	engine         engine.EngineI
 	coordinator    coordinator.Coordinator
@@ -47,8 +52,26 @@ func NewHttpServer(httpPort string, adminAssetsDir string, theEngine engine.Engi
 	self.engine = theEngine
 	self.coordinator = theCoordinator
 	self.userManager = userManager
-	self.shutdown = make(chan bool)
+	self.shutdown = make(chan bool, 2)
 	return self
+}
+
+func (self *HttpServer) EnableSsl(addr, certPath string) error {
+	if addr == "" || certPath == "" {
+		// don't enable ssl unless both the address and the certificate
+		// path aren't empty
+		log.Info("Ssl will be disabled since the ssl port or certificate path weren't set")
+		return nil
+	}
+
+	_, err := os.Stat(certPath)
+	if err != nil {
+		return err
+	}
+
+	self.httpSslPort = addr
+	self.httpSslCert = certPath
+	return nil
 }
 
 func (self *HttpServer) ListenAndServe() {
@@ -111,6 +134,33 @@ func (self *HttpServer) Serve(listener net.Listener) {
 	// fetch current list of available interfaces
 	self.registerEndpoint(p, "get", "/interfaces", self.listInterfaces)
 
+	go func() {
+		defer func() { self.shutdown <- true }()
+
+		// return if the ssl port or cert weren't set
+		if self.httpSslPort == "" || self.httpSslCert == "" {
+			return
+		}
+
+		log.Info("Starting SSL api on port %s using certificate in %s", self.httpSslPort, self.httpSslCert)
+
+		cert, err := tls.LoadX509KeyPair(self.httpSslCert, self.httpSslCert)
+		if err != nil {
+			panic(err)
+		}
+
+		self.sslConn, err = tls.Listen("tcp", self.httpSslPort, &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		})
+		if err != nil {
+			panic(err)
+		}
+
+		if err := libhttp.Serve(self.sslConn, p); err != nil && !strings.Contains(err.Error(), "closed network") {
+			panic(err)
+		}
+	}()
+
 	if err := libhttp.Serve(listener, p); err != nil && !strings.Contains(err.Error(), "closed network") {
 		panic(err)
 	}
@@ -122,10 +172,12 @@ func (self *HttpServer) Close() {
 		log.Info("Closing http server")
 		self.conn.Close()
 		log.Info("Waiting for all requests to finish before killing the process")
-		select {
-		case <-time.After(time.Second * 5):
-			log.Error("There seems to be a hanging request. Closing anyway")
-		case <-self.shutdown:
+		for i := 0; i < 2; i++ {
+			select {
+			case <-time.After(time.Second * 5):
+				log.Error("There seems to be a hanging request. Closing anyway")
+			case <-self.shutdown:
+			}
 		}
 	}
 }
